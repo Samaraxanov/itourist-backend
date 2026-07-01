@@ -1,0 +1,238 @@
+// Tour Marketplace — Prisma schema
+// DB: PostgreSQL. Uses JSON columns for multilingual fields (uz / ru / en).
+//
+// Design notes:
+// - Multilingual content is stored as JSON: { "uz": "...", "ru": "...", "en": "..." }
+//   This avoids a translations table explosion while keeping tours queryable.
+// - Money is stored as integer minor units (tiyin/cents) to avoid float errors.
+// - Soft delete via `deletedAt` on Tour so historical bookings stay valid.
+// - Enums model the state machines (firm verification, tour status, booking status).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Enums ----------
+
+enum Role {
+  USER
+  FIRM
+  ADMIN
+}
+
+enum FirmStatus {
+  PENDING // submitted, awaiting admin review
+  VERIFIED // approved, may publish live tours
+  SUSPENDED // temporarily blocked
+  REJECTED
+}
+
+enum TourStatus {
+  DRAFT // firm is still editing
+  PUBLISHED // live and publicly visible
+  UNPUBLISHED // hidden by firm
+  ARCHIVED // retired
+}
+
+enum BookingStatus {
+  REQUESTED // user submitted a request-to-book
+  CONFIRMED // firm accepted
+  DECLINED // firm declined
+  CANCELLED // user cancelled
+  COMPLETED // tour happened
+}
+
+enum Currency {
+  UZS
+  USD
+  EUR
+}
+
+// ---------- Core identity ----------
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  role         Role      @default(USER)
+  firstName    String?
+  lastName     String?
+  phone        String?
+  locale       String    @default("uz") // preferred UI language
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  firm          Firm?          @relation("FirmOwner")
+  bookings      Booking[]
+  reviews       Review[]
+  refreshTokens RefreshToken[]
+
+  @@index([role])
+}
+
+// Rotating refresh tokens (stored hashed) enable secure logout + reuse detection.
+model RefreshToken {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  userAgent String?
+  ip        String?
+
+  @@index([userId])
+}
+
+// ---------- Vendor (tour firm) ----------
+
+model Firm {
+  id          String     @id @default(cuid())
+  ownerId     String     @unique
+  owner       User       @relation("FirmOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  name        String
+  slug        String     @unique
+  description Json? // multilingual { uz, ru, en }
+  logoUrl     String?
+  coverUrl    String?
+  status      FirmStatus @default(PENDING)
+  // Contact + trust signals
+  email       String?
+  phone       String?
+  website     String?
+  address     String?
+  licenseNo   String? // tour operator license, for verification
+  verifiedAt  DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  tours Tour[]
+
+  @@index([status])
+}
+
+// ---------- Catalog ----------
+
+model Category {
+  id    String @id @default(cuid())
+  slug  String @unique // e.g. "cultural", "adventure", "gastro"
+  name  Json // multilingual
+  icon  String?
+  tours Tour[]
+}
+
+model Region {
+  id    String @id @default(cuid())
+  slug  String @unique // e.g. "samarkand", "bukhara", "tashkent"
+  name  Json // multilingual
+  tours Tour[]
+}
+
+model Tour {
+  id           String     @id @default(cuid())
+  firmId       String
+  firm         Firm       @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  slug         String     @unique
+  title        Json // multilingual { uz, ru, en }
+  summary      Json? // short multilingual teaser
+  description  Json? // long multilingual body
+  itinerary    Json? // array of day objects, each multilingual
+  status       TourStatus @default(DRAFT)
+
+  // Pricing (minor units, e.g. tiyin). priceFrom is the headline price.
+  priceFrom    Int
+  currency     Currency   @default(UZS)
+
+  // Facts used for filtering
+  durationDays Int        @default(1)
+  durationHours Int?      // for sub-day tours
+  maxGroupSize Int?
+  minAge       Int?
+  languages    String[]   @default([]) // tour-guide languages: ["uz","ru","en"]
+
+  categoryId   String?
+  category     Category?  @relation(fields: [categoryId], references: [id])
+  regionId     String?
+  region       Region?    @relation(fields: [regionId], references: [id])
+
+  images       String[]   @default([]) // ordered image URLs; first is cover
+  included     Json? // multilingual list of what's included
+  excluded     Json? // multilingual list of what's not
+
+  // Denormalized rating aggregates for cheap sorting/display
+  ratingAvg    Float      @default(0)
+  ratingCount  Int        @default(0)
+
+  publishedAt  DateTime?
+  deletedAt    DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  bookings     Booking[]
+  reviews      Review[]
+
+  @@index([status, deletedAt])
+  @@index([firmId])
+  @@index([categoryId])
+  @@index([regionId])
+  @@index([priceFrom])
+  @@index([ratingAvg])
+}
+
+// ---------- Transactions ----------
+
+model Booking {
+  id            String        @id @default(cuid())
+  reference     String        @unique // human-friendly, e.g. "TM-8F3K2A"
+  tourId        String
+  tour          Tour          @relation(fields: [tourId], references: [id])
+  userId        String
+  user          User          @relation(fields: [userId], references: [id])
+  status        BookingStatus @default(REQUESTED)
+
+  // Snapshot of what was requested (immutable even if the tour changes later)
+  startDate     DateTime
+  peopleCount   Int           @default(1)
+  totalPrice    Int // minor units, snapshot at request time
+  currency      Currency
+  contactName   String
+  contactPhone  String
+  contactEmail  String
+  note          String?
+
+  firmResponse  String? // message from firm on confirm/decline
+  respondedAt   DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  review        Review?
+
+  @@index([userId])
+  @@index([tourId])
+  @@index([status])
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  tourId    String
+  tour      Tour     @relation(fields: [tourId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookingId String?  @unique // one review per booking; ensures reviewer actually booked
+  booking   Booking? @relation(fields: [bookingId], references: [id])
+  rating    Int // 1..5
+  comment   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tourId, userId]) // one review per user per tour
+  @@index([tourId])
+}
