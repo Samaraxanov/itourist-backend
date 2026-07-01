@@ -1,3 +1,4 @@
+import path from 'node:path';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -11,13 +12,21 @@ import authRoutes from './modules/auth/auth.routes.js';
 import tourRoutes from './modules/tours/tour.routes.js';
 import firmRoutes from './modules/firms/firm.routes.js';
 import bookingRoutes from './modules/bookings/booking.routes.js';
+import reviewRoutes from './modules/reviews/review.routes.js';
+import departureRoutes from './modules/departures/departure.routes.js';
+import paymentRoutes from './modules/payments/payment.routes.js';
+import notificationRoutes from './modules/notifications/notification.routes.js';
+import adminRoutes from './modules/admin/admin.routes.js';
+import uploadRoutes from './modules/uploads/upload.routes.js';
 import metaRoutes from './modules/meta.routes.js';
+import seoRoutes from './modules/seo.routes.js';
 
 export function createApp() {
   const app = express();
 
   app.set('trust proxy', 1); // correct req.ip behind a reverse proxy
-  app.use(helmet());
+  // `crossOriginResourcePolicy` disabled so the SPA on :5173 can load /uploads images.
+  app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   app.use(
     cors({
       origin: env.CORS_ORIGIN.split(',').map((s) => s.trim()),
@@ -34,11 +43,23 @@ export function createApp() {
 
   app.get('/health', (_req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
 
+  // Mock object storage: serve uploaded images statically.
+  app.use('/uploads', express.static(path.resolve(process.cwd(), env.UPLOAD_DIR)));
+
+  // SEO endpoints live at the root (robots.txt, sitemap.xml).
+  app.use('/', seoRoutes);
+
   const api = express.Router();
   api.use('/auth', authRoutes);
   api.use('/tours', tourRoutes);
   api.use('/firms', firmRoutes);
   api.use('/bookings', bookingRoutes);
+  api.use('/reviews', reviewRoutes);
+  api.use('/departures', departureRoutes);
+  api.use('/payments', paymentRoutes);
+  api.use('/notifications', notificationRoutes);
+  api.use('/admin', adminRoutes);
+  api.use('/uploads', uploadRoutes);
   api.use('/meta', metaRoutes);
   app.use('/api/v1', api);
 

@@ -6,7 +6,11 @@
 //   This avoids a translations table explosion while keeping tours queryable.
 // - Money is stored as integer minor units (tiyin/cents) to avoid float errors.
 // - Soft delete via `deletedAt` on Tour so historical bookings stay valid.
-// - Enums model the state machines (firm verification, tour status, booking status).
+// - Enums model the state machines (firm verification, tour, booking, payment).
+// - Full-text search: `searchText` is a denormalised, maintained concatenation of
+//   the multilingual content; a generated `tsvector` column + GIN index is added in
+//   the `search_vector` migration (Prisma can't express generated columns, so it
+//   lives in raw SQL — see prisma/migrations).
 
 generator client {
   provider = "prisma-client-js"
@@ -41,7 +45,7 @@ enum TourStatus {
 
 enum BookingStatus {
   REQUESTED // user submitted a request-to-book
-  CONFIRMED // firm accepted
+  CONFIRMED // firm accepted (or auto-confirmed via instant departure)
   DECLINED // firm declined
   CANCELLED // user cancelled
   COMPLETED // tour happened
@@ -51,6 +55,43 @@ enum Currency {
   UZS
   USD
   EUR
+}
+
+enum DepartureStatus {
+  OPEN // accepting bookings
+  CLOSED // full or manually closed
+  CANCELLED // called off
+}
+
+// Uzbekistan payment rails, plus MOCK for local/dev simulation.
+enum PaymentProvider {
+  MOCK
+  PAYME
+  CLICK
+  UZUM
+}
+
+// Payment lifecycle: authorize (hold) on booking confirm, capture on completion.
+enum PaymentStatus {
+  PENDING // created, awaiting authorization
+  AUTHORIZED // funds held
+  CAPTURED // funds taken; commission split recorded
+  REFUNDED // returned to traveller
+  FAILED // provider rejected
+  CANCELLED // hold released without capture
+}
+
+enum NotificationType {
+  BOOKING_REQUESTED // firm: a new request arrived
+  BOOKING_CONFIRMED // traveller: firm confirmed
+  BOOKING_DECLINED // traveller: firm declined
+  BOOKING_CANCELLED // firm: traveller cancelled
+  BOOKING_COMPLETED // traveller: tour marked complete (leave a review!)
+  PAYMENT_CAPTURED // both: payment settled
+  PAYMENT_REFUNDED // traveller: refund issued
+  FIRM_VERIFIED // firm: you can now publish
+  FIRM_STATUS_CHANGED // firm: status changed
+  REVIEW_RECEIVED // firm: a tour got a new review
 }
 
 // ---------- Core identity ----------
@@ -73,6 +114,7 @@ model User {
   bookings      Booking[]
   reviews       Review[]
   refreshTokens RefreshToken[]
+  notifications Notification[]
 
   @@index([role])
 }
@@ -137,47 +179,55 @@ model Region {
 }
 
 model Tour {
-  id           String     @id @default(cuid())
-  firmId       String
-  firm         Firm       @relation(fields: [firmId], references: [id], onDelete: Cascade)
-  slug         String     @unique
-  title        Json // multilingual { uz, ru, en }
-  summary      Json? // short multilingual teaser
-  description  Json? // long multilingual body
-  itinerary    Json? // array of day objects, each multilingual
-  status       TourStatus @default(DRAFT)
+  id            String     @id @default(cuid())
+  firmId        String
+  firm          Firm       @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  slug          String     @unique
+  title         Json // multilingual { uz, ru, en }
+  summary       Json? // short multilingual teaser
+  description   Json? // long multilingual body
+  itinerary     Json? // array of day objects, each multilingual
+  status        TourStatus @default(DRAFT)
 
   // Pricing (minor units, e.g. tiyin). priceFrom is the headline price.
-  priceFrom    Int
-  currency     Currency   @default(UZS)
+  priceFrom     Int
+  currency      Currency   @default(UZS)
 
   // Facts used for filtering
-  durationDays Int        @default(1)
-  durationHours Int?      // for sub-day tours
-  maxGroupSize Int?
-  minAge       Int?
-  languages    String[]   @default([]) // tour-guide languages: ["uz","ru","en"]
+  durationDays  Int        @default(1)
+  durationHours Int? // for sub-day tours
+  maxGroupSize  Int?
+  minAge        Int?
+  languages     String[]   @default([]) // tour-guide languages: ["uz","ru","en"]
 
-  categoryId   String?
-  category     Category?  @relation(fields: [categoryId], references: [id])
-  regionId     String?
-  region       Region?    @relation(fields: [regionId], references: [id])
+  categoryId    String?
+  category      Category?  @relation(fields: [categoryId], references: [id])
+  regionId      String?
+  region        Region?    @relation(fields: [regionId], references: [id])
 
-  images       String[]   @default([]) // ordered image URLs; first is cover
-  included     Json? // multilingual list of what's included
-  excluded     Json? // multilingual list of what's not
+  images        String[]   @default([]) // ordered image URLs; first is cover
+  included      Json? // multilingual list of what's included
+  excluded      Json? // multilingual list of what's not
 
   // Denormalized rating aggregates for cheap sorting/display
-  ratingAvg    Float      @default(0)
-  ratingCount  Int        @default(0)
+  ratingAvg     Float      @default(0)
+  ratingCount   Int        @default(0)
 
-  publishedAt  DateTime?
-  deletedAt    DateTime?
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  // Search: maintained concatenation of multilingual text (see search_vector migration)
+  searchText    String     @default("")
 
-  bookings     Booking[]
-  reviews      Review[]
+  // Growth: promoted/featured listings (monetisation)
+  featured      Boolean    @default(false)
+  featuredUntil DateTime?
+
+  publishedAt   DateTime?
+  deletedAt     DateTime?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  bookings      Booking[]
+  reviews       Review[]
+  departures    Departure[]
 
   @@index([status, deletedAt])
   @@index([firmId])
@@ -185,39 +235,107 @@ model Tour {
   @@index([regionId])
   @@index([priceFrom])
   @@index([ratingAvg])
+  @@index([featured, featuredUntil])
+}
+
+// ---------- Availability & scheduling ----------
+
+// A concrete departure date with finite seat inventory. Tours may have many.
+// A booking can target a departure (seat-managed) or be an open request (legacy).
+model Departure {
+  id             String          @id @default(cuid())
+  tourId         String
+  tour           Tour            @relation(fields: [tourId], references: [id], onDelete: Cascade)
+  startDate      DateTime
+  endDate        DateTime?
+  capacity       Int             @default(10)
+  seatsBooked    Int             @default(0) // reserved seats (REQUESTED + CONFIRMED)
+  priceOverride  Int? // minor units; overrides tour.priceFrom when set
+  instantConfirm Boolean         @default(false) // skip firm approval, auto-confirm
+  status         DepartureStatus @default(OPEN)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  bookings       Booking[]
+
+  @@index([tourId, startDate])
+  @@index([status])
 }
 
 // ---------- Transactions ----------
 
 model Booking {
-  id            String        @id @default(cuid())
-  reference     String        @unique // human-friendly, e.g. "TM-8F3K2A"
-  tourId        String
-  tour          Tour          @relation(fields: [tourId], references: [id])
-  userId        String
-  user          User          @relation(fields: [userId], references: [id])
-  status        BookingStatus @default(REQUESTED)
+  id           String        @id @default(cuid())
+  reference    String        @unique // human-friendly, e.g. "TM-8F3K2A"
+  tourId       String
+  tour         Tour          @relation(fields: [tourId], references: [id])
+  userId       String
+  user         User          @relation(fields: [userId], references: [id])
+  departureId  String?
+  departure    Departure?    @relation(fields: [departureId], references: [id])
+  status       BookingStatus @default(REQUESTED)
 
   // Snapshot of what was requested (immutable even if the tour changes later)
-  startDate     DateTime
-  peopleCount   Int           @default(1)
-  totalPrice    Int // minor units, snapshot at request time
-  currency      Currency
-  contactName   String
-  contactPhone  String
-  contactEmail  String
-  note          String?
+  startDate    DateTime
+  peopleCount  Int           @default(1)
+  totalPrice   Int // minor units, snapshot at request time
+  currency     Currency
+  contactName  String
+  contactPhone String
+  contactEmail String
+  note         String?
 
-  firmResponse  String? // message from firm on confirm/decline
-  respondedAt   DateTime?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  firmResponse String? // message from firm on confirm/decline
+  respondedAt  DateTime?
+  completedAt  DateTime?
+  cancelledAt  DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
 
-  review        Review?
+  review       Review?
+  payment      Payment?
 
   @@index([userId])
   @@index([tourId])
   @@index([status])
+  @@index([departureId])
+}
+
+// ---------- Payments (mock providers; hold-on-confirm, capture-on-completion) ----------
+
+model Payment {
+  id               String          @id @default(cuid())
+  bookingId        String          @unique
+  booking          Booking         @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  provider         PaymentProvider @default(MOCK)
+  status           PaymentStatus   @default(PENDING)
+  amount           Int // gross, minor units
+  currency         Currency
+  commissionAmount Int             @default(0) // platform cut, minor units
+  netAmount        Int             @default(0) // firm payout, minor units
+  providerRef      String? // provider-side transaction id
+  authorizedAt     DateTime?
+  capturedAt       DateTime?
+  refundedAt       DateTime?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  events           PaymentEvent[]
+
+  @@index([status])
+  @@index([provider])
+}
+
+// Append-only audit trail of provider callbacks / state transitions.
+model PaymentEvent {
+  id        String   @id @default(cuid())
+  paymentId String
+  payment   Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  type      String // e.g. "authorized", "captured", "webhook:paycom.check"
+  payload   Json?
+  createdAt DateTime @default(now())
+
+  @@index([paymentId])
 }
 
 model Review {
@@ -230,9 +348,27 @@ model Review {
   booking   Booking? @relation(fields: [bookingId], references: [id])
   rating    Int // 1..5
   comment   String?
+  firmReply String? // firm's public response to the review
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([tourId, userId]) // one review per user per tour
   @@index([tourId])
+}
+
+// ---------- Notifications (in-app; email/SMS mocked to logger) ----------
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  title     String
+  body      String
+  data      Json? // arbitrary context (bookingId, tourSlug, ...)
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  @@index([userId, readAt])
+  @@index([createdAt])
 }

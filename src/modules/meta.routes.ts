@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { prisma } from '../../lib/prisma.js';
-import { catchAsync } from '../../utils/catchAsync.js';
+import { prisma } from '../lib/prisma.js';
+import { catchAsync } from '../utils/catchAsync.js';
 
 // Lightweight lookup data the frontend needs to render filters.
 const router = Router();

@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { Prisma } from '@prisma/client';
 import { ApiError } from '../utils/apiError.js';
 import { logger } from '../lib/logger.js';
+import { captureException } from '../lib/observability.js';
 import { isProd } from '../config/env.js';
 
 export function notFound(_req: Request, _res: Response, next: NextFunction) {
@@ -47,6 +48,7 @@ export function errorHandler(
 
   if (status >= 500) {
     logger.error({ err }, 'Unhandled error');
+    captureException(err);
   }
 
   res.status(status).json({
