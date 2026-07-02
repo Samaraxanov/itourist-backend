@@ -17,6 +17,8 @@ export default defineConfig({
       JWT_REFRESH_SECRET: 'test_refresh_secret_at_least_16_chars',
       PUBLIC_BASE_URL: 'http://localhost:4000',
       NOTIFY_CHANNEL: 'off',
+      TELEGRAM_BOT_TOKEN: 'test-bot-token',
+      TELEGRAM_ADMIN_IDS: '999',
     },
   },
 });

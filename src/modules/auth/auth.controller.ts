@@ -17,6 +17,11 @@ export const login = catchAsync(async (req: Request, res: Response) => {
   res.json(result);
 });
 
+export const telegram = catchAsync(async (req: Request, res: Response) => {
+  const result = await authService.telegramAuth(req.body.initData, meta(req));
+  res.json(result);
+});
+
 export const refresh = catchAsync(async (req: Request, res: Response) => {
   const result = await authService.refresh(req.body.refreshToken, meta(req));
   res.json(result);

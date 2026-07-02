@@ -1,6 +1,8 @@
+import crypto from 'node:crypto';
 import { Prisma, type User } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/apiError.js';
+import { env } from '../../config/env.js';
 import { hashPassword, verifyPassword } from '../../utils/password.js';
 import {
   signAccessToken,
@@ -8,6 +10,7 @@ import {
   hashToken,
 } from '../../utils/jwt.js';
 import { slugify } from '../../utils/slugify.js';
+import { verifyInitData } from '../../utils/telegram.js';
 import type { RegisterInput, LoginInput } from './auth.schema.js';
 
 interface SessionMeta {
@@ -24,6 +27,7 @@ const publicUser = (u: User) => ({
   lastName: u.lastName,
   phone: u.phone,
   locale: u.locale,
+  telegramPhotoUrl: u.telegramPhotoUrl,
 });
 
 async function issueSession(user: User, meta: SessionMeta) {
@@ -87,6 +91,48 @@ export async function login(input: LoginInput, meta: SessionMeta) {
   if (!ok) throw ApiError.unauthorized('Invalid credentials');
 
   await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+  return issueSession(user, meta);
+}
+
+// Telegram Mini App login: verify signed initData, then find-or-create the account
+// keyed by Telegram id. Users whose Telegram id is in TELEGRAM_ADMIN_IDS become ADMIN.
+export async function telegramAuth(initData: string, meta: SessionMeta) {
+  if (!env.TELEGRAM_BOT_TOKEN) throw ApiError.badRequest('Telegram login is not configured');
+  const tg = verifyInitData(initData, env.TELEGRAM_BOT_TOKEN);
+  const telegramId = String(tg.id);
+
+  const adminIds = env.TELEGRAM_ADMIN_IDS.split(',').map((s) => s.trim()).filter(Boolean);
+  const isAdmin = adminIds.includes(telegramId);
+
+  const existing = await prisma.user.findUnique({ where: { telegramId } });
+
+  const user = existing
+    ? await prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          telegramUsername: tg.username,
+          telegramPhotoUrl: tg.photo_url,
+          lastLoginAt: new Date(),
+          // Keep admin role in sync with the configured allow-list.
+          ...(isAdmin && existing.role !== 'ADMIN' ? { role: 'ADMIN' as const } : {}),
+        },
+      })
+    : await prisma.user.create({
+        data: {
+          telegramId,
+          telegramUsername: tg.username,
+          telegramPhotoUrl: tg.photo_url,
+          // Telegram doesn't share email; synthesize a unique placeholder.
+          email: `tg_${telegramId}@telegram.local`,
+          passwordHash: await hashPassword(crypto.randomBytes(24).toString('hex')),
+          firstName: tg.first_name,
+          lastName: tg.last_name,
+          locale: tg.language_code === 'ru' || tg.language_code === 'uz' ? tg.language_code : 'uz',
+          role: isAdmin ? 'ADMIN' : 'USER',
+          lastLoginAt: new Date(),
+        },
+      });
+
   return issueSession(user, meta);
 }
 

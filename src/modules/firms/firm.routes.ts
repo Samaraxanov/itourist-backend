@@ -20,7 +20,19 @@ const updateFirmSchema = z.object({
   licenseNo: z.string().max(80).optional(),
 });
 
+const registerFirmSchema = z.object({ firmName: z.string().min(2).max(120) });
+
 const router = Router();
+
+// --- Any authenticated user becomes a firm (used by the Telegram mini app) ---
+router.post(
+  '/register',
+  authenticate,
+  validate({ body: registerFirmSchema }),
+  catchAsync(async (req: Request, res: Response) => {
+    res.status(201).json(await service.registerFirm(req.auth!.userId, req.body.firmName));
+  })
+);
 
 // --- Firm: own analytics + profile (declared before '/:slug' to avoid capture) ---
 router.get(

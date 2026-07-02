@@ -21,6 +21,14 @@ const schema = z.object({
   NOTIFY_CHANNEL: z.enum(['log', 'off']).default('log'),
   // Optional Sentry DSN; when absent, error tracking is a no-op.
   SENTRY_DSN: z.string().optional(),
+
+  // Telegram Mini App: bot token (from @BotFather) used to verify initData.
+  // When absent, the /auth/telegram endpoint is disabled.
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
+  // Comma-separated Telegram user IDs that should be treated as platform admins.
+  TELEGRAM_ADMIN_IDS: z.string().default(''),
+  // The public HTTPS URL of the Mini App (used by the bot setup script).
+  TELEGRAM_WEBAPP_URL: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);

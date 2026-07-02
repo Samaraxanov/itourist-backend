@@ -1,6 +1,34 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/apiError.js';
+import { slugify } from '../../utils/slugify.js';
+
+async function uniqueFirmSlug(tx: Prisma.TransactionClient, name: string) {
+  const base = slugify(name);
+  let slug = base;
+  let n = 1;
+  while (await tx.firm.findUnique({ where: { slug } })) slug = `${base}-${n++}`;
+  return slug;
+}
+
+// A logged-in user (e.g. via Telegram) turns their account into a tour operator:
+// upgrades role to FIRM and creates a PENDING firm awaiting admin verification.
+export async function registerFirm(userId: string, firmName: string) {
+  const existing = await prisma.firm.findUnique({ where: { ownerId: userId } });
+  if (existing) throw ApiError.conflict('You already have a firm');
+
+  return prisma.$transaction(async (tx) => {
+    await tx.user.update({ where: { id: userId }, data: { role: 'FIRM' } });
+    return tx.firm.create({
+      data: {
+        ownerId: userId,
+        name: firmName,
+        slug: await uniqueFirmSlug(tx, firmName),
+        status: 'PENDING',
+      },
+    });
+  });
+}
 
 export interface UpdateFirmInput {
   name?: string;

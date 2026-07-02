@@ -107,6 +107,12 @@ model User {
   locale       String    @default("uz") // preferred UI language
   isActive     Boolean   @default(true)
   lastLoginAt  DateTime?
+
+  // Telegram Mini App identity (set when the account is opened via the bot)
+  telegramId       String?  @unique
+  telegramUsername String?
+  telegramPhotoUrl String?
+
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
@@ -213,8 +219,11 @@ model Tour {
   ratingAvg     Float      @default(0)
   ratingCount   Int        @default(0)
 
-  // Search: maintained concatenation of multilingual text (see search_vector migration)
+  // Search: maintained concatenation of multilingual text (see search_vector migration).
+  // `searchVector` is a generated tsvector column managed in raw SQL; declared here as
+  // Unsupported so Prisma tracks (and does not drop) it.
   searchText    String     @default("")
+  searchVector  Unsupported("tsvector")?
 
   // Growth: promoted/featured listings (monetisation)
   featured      Boolean    @default(false)
@@ -236,6 +245,7 @@ model Tour {
   @@index([priceFrom])
   @@index([ratingAvg])
   @@index([featured, featuredUntil])
+  @@index([searchVector], type: Gin)
 }
 
 // ---------- Availability & scheduling ----------
