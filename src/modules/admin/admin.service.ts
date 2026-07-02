@@ -1,7 +1,61 @@
-import type { FirmStatus } from '@prisma/client';
+import crypto from 'node:crypto';
+import { Prisma, type FirmStatus } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/apiError.js';
+import { hashPassword } from '../../utils/password.js';
+import { slugify } from '../../utils/slugify.js';
 import { notify } from '../notifications/notification.service.js';
+
+// ---------- Admin-created firms ----------
+
+interface CreateFirmInput {
+  email: string;
+  firmName: string;
+  password?: string; // optional; a temporary one is generated when omitted
+  phone?: string;
+  licenseNo?: string;
+  status: 'PENDING' | 'VERIFIED';
+}
+
+// Generate a firm slug unique across firms.
+async function uniqueFirmSlug(tx: Prisma.TransactionClient, name: string) {
+  const base = slugify(name);
+  let slug = base;
+  let n = 1;
+  while (await tx.firm.findUnique({ where: { slug } })) slug = `${base}-${n++}`;
+  return slug;
+}
+
+// Admin onboards a firm directly: creates the owner account + firm together.
+// Returns the temporary password only when one was generated, so the admin can
+// share initial credentials with the operator.
+export async function createFirm(input: CreateFirmInput) {
+  const existing = await prisma.user.findUnique({ where: { email: input.email } });
+  if (existing) throw ApiError.conflict('A user with this email already exists');
+
+  const tempPassword = input.password ?? crypto.randomBytes(9).toString('base64url').slice(0, 12);
+  const passwordHash = await hashPassword(tempPassword);
+
+  const firm = await prisma.$transaction(async (tx) => {
+    const owner = await tx.user.create({
+      data: { email: input.email, passwordHash, role: 'FIRM' },
+    });
+    return tx.firm.create({
+      data: {
+        ownerId: owner.id,
+        name: input.firmName,
+        slug: await uniqueFirmSlug(tx, input.firmName),
+        email: input.email,
+        phone: input.phone,
+        licenseNo: input.licenseNo,
+        status: input.status,
+        verifiedAt: input.status === 'VERIFIED' ? new Date() : null,
+      },
+    });
+  });
+
+  return { firm, tempPassword: input.password ? undefined : tempPassword };
+}
 
 // ---------- Firm verification queue ----------
 

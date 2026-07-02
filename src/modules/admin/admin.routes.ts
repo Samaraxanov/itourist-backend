@@ -10,6 +10,14 @@ import * as service from './admin.service.js';
 const verifySchema = z.object({
   status: z.enum(['VERIFIED', 'SUSPENDED', 'REJECTED', 'PENDING']),
 });
+const createFirmSchema = z.object({
+  email: z.string().email().toLowerCase(),
+  firmName: z.string().min(2).max(120),
+  password: z.string().min(8).max(128).optional(),
+  phone: z.string().min(5).max(30).optional(),
+  licenseNo: z.string().max(80).optional(),
+  status: z.enum(['PENDING', 'VERIFIED']).default('VERIFIED'),
+});
 const featureSchema = z.object({
   days: z.number().int().min(0).max(365),
 });
@@ -28,6 +36,11 @@ router.get('/stats', catchAsync(async (_req: Request, res: Response) => {
 router.get('/firms', catchAsync(async (req: Request, res: Response) => {
   const status = req.query.status as never;
   res.json(await service.listFirms(status));
+}));
+
+// --- Admin creates a firm (+ owner account) directly ---
+router.post('/firms', validate({ body: createFirmSchema }), catchAsync(async (req: Request, res: Response) => {
+  res.status(201).json(await service.createFirm(req.body));
 }));
 
 router.post('/firms/:id/verify', validate({ body: verifySchema }), catchAsync(async (req: Request, res: Response) => {
