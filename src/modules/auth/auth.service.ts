@@ -134,7 +134,7 @@ export async function logout(rawToken: string) {
 export async function me(userId: string) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    include: { firm: { select: { id: true, name: true, slug: true, status: true } } },
+    include: { firm: { select: { id: true, name: true, slug: true, status: true, logoUrl: true } } },
   });
   if (!user) throw ApiError.notFound('User not found');
   return { ...publicUser(user), firm: user.firm };
